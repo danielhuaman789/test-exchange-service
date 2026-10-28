@@ -1,77 +1,72 @@
-# Desafío Técnico – API de Tipo de Cambio
+# API de conversión de monedas
 
-## Descripción
+Microservicio que consulta ExchangeRate-API mediante OpenFeign,
+convierte montos entre monedas y almacena cada conversión en H2.
 
-Microservicio en Java para consumir un servicio externo de tipo de cambio y exponer una API REST que permita convertir montos entre distintas monedas.
+## Requisitos
 
----
+- JDK 17 o superior.
+- Acceso a Internet para descargar dependencias y consultar ExchangeRate-API.
+- Una API Key de ExchangeRate-API.
+- Maven Wrapper incluido; no es necesario instalar Maven.
 
-## Stack Tecnológico
+## Tecnologías
 
-| Tecnología | Versión |
-|---|---|
-| Java | 17 |
-| Spring Boot | 4.0.6 |
-| Spring Cloud OpenFeign | 2025.1.1 |
-| H2 (base de datos en memoria) | Runtime |
-| Spring Data JPA | Incluido |
-| Lombok | Incluido |
-| Maven | Wrapper incluido |
+- Java 17 como versión de compilación.
+- Spring Boot 4.0.6.
+- Spring Cloud OpenFeign 2025.1.1.
+- Spring Data JPA.
+- H2 en memoria.
+- JUnit 5 y Mockito.
 
----
+## Arquitectura
 
-## Lo que ya está configurado
+Se aplican principios de DDD con separación en tres capas:
 
-### Cliente HTTP externo (OpenFeign)
+- Domain: Currency como objeto de valor, Conversion como entidad
+  identificada por UUID, excepciones y contratos de persistencia
+  y consulta de tasas. No depende de Spring, JPA ni Feign.
+- Application: controller REST, DTOs y servicio que coordina
+  validación, consulta, cálculo y persistencia.
+- Infrastructure: cliente OpenFeign, adaptador del proveedor,
+  entidad JPA y adaptador de persistencia.
 
-El cliente Feign ya está implementado y apuntando a la API pública de tipo de cambio:
+Las interfaces ConversionRepository y ExchangeRateProvider permiten
+que la aplicación dependa de contratos del dominio y que las
+implementaciones técnicas puedan sustituirse.
 
-- **Interfaz:** `infrastructure/external/ExchangeRateApiClient.java`
-- **DTO de respuesta:** `infrastructure/external/dto/ExchangeRateApiResponse.java`
-- **API usada:** `https://v6.exchangerate-api.com/v6`
-- **Endpoint:** `GET /{apiKey}/latest/{baseCurrency}`
+La entidad JPA está separada de la entidad de dominio.
 
-La clase principal ya tiene habilitado `@EnableFeignClients`.
+## Ejecución en Windows PowerShell
 
-### Base de datos H2
+Desde la carpeta del proyecto:
 
-Datasource, JPA y consola H2 listos en `application.yaml`:
-
-| Parámetro | Valor |
-|---|---|
-| JDBC URL | `jdbc:h2:mem:testdb` |
-| Usuario | `sa` |
-| Password | `password` |
-| Consola | `http://localhost:8080/h2-console` |
-| DDL | `update` (auto-creación de tablas) |
-
-### Estructura de paquetes sugerida
-
-```
-pe.test.exchange
-├── domain
-│   ├── model           ← Entidades JPA
-│   ├── repository      ← Interfaces de repositorio
-│   ├── service         ← Contratos de dominio
-│   └── exception       ← Excepciones de dominio
-├── application
-│   ├── controller      ← Endpoints REST
-│   ├── service         ← Lógica de aplicación
-│   └── dto             ← Request / Response
-└── infrastructure
-    ├── external        ← Cliente Feign (YA IMPLEMENTADO)
-    └── persistence     ← Implementaciones de repositorio
+```powershell
+$env:EXCHANGE_RATE_API_KEY="TU_API_KEY"
+.\mvnw.cmd spring-boot:run
 ```
 
----
+## Ejecución en Linux o macOS
 
-## Lo que debes implementar
+```bash
+export EXCHANGE_RATE_API_KEY="TU_API_KEY"
+chmod +x mvnw
+./mvnw spring-boot:run
+```
 
-### 1. Endpoint de conversión
+La aplicación escucha en http://localhost:8080.
 
-Exponer `POST /api/conversion` con el siguiente contrato:
+La clave se lee desde una variable de entorno y no se incluye
+en el repositorio.
 
-**Request:**
+## Endpoint
+
+POST /api/conversion
+
+Content-Type: application/json
+
+Request:
+
 ```json
 {
   "monto": 100,
@@ -80,51 +75,137 @@ Exponer `POST /api/conversion` con el siguiente contrato:
 }
 ```
 
-**Response:**
+Ejemplo de respuesta HTTP 200:
+
 ```json
 {
   "monto": 100,
-  "montoConvertido": 370.00,
+  "montoConvertido": 344.86,
   "monedaOrigen": "USD",
   "monedaDestino": "PEN",
-  "tipoCambio": 3.70
+  "tipoCambio": 3.4486
 }
 ```
 
-### 2. Integración con el cliente Feign existente
+La tasa y el resultado dependen de la respuesta del proveedor.
 
-Usar `ExchangeRateApiClient` para obtener el tipo de cambio real desde:
+Ejemplo desde PowerShell:
 
+```powershell
+$body = @{
+    monto = 100
+    monedaOrigen = "USD"
+    monedaDestino = "PEN"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "http://localhost:8080/api/conversion" -Method Post -ContentType "application/json" -Body $body | ConvertTo-Json
 ```
-https://v6.exchangerate-api.com/v6/{apiKey}/latest/{baseCurrency}
+
+## Validaciones y cálculo
+
+- Monto obligatorio y mayor que cero.
+- Hasta 20 dígitos enteros y 10 decimales en el monto.
+- Códigos de moneda obligatorios de tres letras.
+- Se normalizan espacios al inicio y al final, y minúsculas.
+- Se validan las monedas usando el catálogo del JDK.
+- La tasa debe ser positiva y existir en la respuesta del proveedor.
+- Se utiliza BigDecimal para los cálculos.
+- El resultado se redondea con HALF_UP según los decimales
+  de la moneda destino.
+- La conversión se guarda antes de devolver una respuesta exitosa.
+
+## Manejo de errores
+
+Las respuestas manejadas utilizan ProblemDetail.
+
+| HTTP | Situación |
+|---|---|
+| 400 | Monto o moneda inválidos, moneda destino no soportada o JSON ilegible |
+| 502 | Fallo al consultar el proveedor o respuesta externa inválida |
+| 500 | Error al guardar la conversión |
+
+Ejemplo de error por monto negativo:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Solicitud inválida",
+  "status": 400,
+  "detail": "El monto debe ser mayor que cero",
+  "instance": "/api/conversion"
+}
 ```
 
-La API key ya está configurada en `application.yaml` bajo `exchange-rate.api.key`.
+## Persistencia y consola H2
 
-### 3. Persistencia
+Cada operación almacena:
 
-Almacenar cada conversión en H2 con los siguientes datos:
+- Identificador UUID.
+- Monto original.
+- Monedas de origen y destino.
+- Tasa aplicada.
+- Monto convertido.
+- Fecha de operación como Instant.
 
-- Monto original
-- Moneda origen / destino
-- Tipo de cambio aplicado
-- Monto convertido
-- Fecha de la operación
+Con la aplicación ejecutándose, abrir:
 
----
+http://localhost:8080/h2-console
 
-## Consideraciones de Diseño
+Datos de conexión:
 
-- Aplicar **Domain-Driven Design (DDD)** con separación clara de capas
-- Manejo adecuado de errores (moneda inválida, servicio externo no disponible)
-- Código limpio y mantenible
+- Driver: org.h2.Driver
+- JDBC URL: jdbc:h2:mem:testdb
+- Usuario: sa
+- Contraseña: password
 
----
+Consulta:
 
-## Cómo ejecutar
+```sql
+SELECT * FROM conversiones;
+```
+
+La base es temporal: los registros se pierden al detener la aplicación.
+
+## Pruebas
+
+Windows:
+
+```powershell
+.\mvnw.cmd test
+```
+
+Linux o macOS:
 
 ```bash
-./mvnw spring-boot:run
+./mvnw test
 ```
 
-La aplicación levanta en `http://localhost:8080`.
+Se incluyen siete pruebas unitarias del servicio y una prueba
+de carga del contexto de Spring.
+
+Las pruebas unitarias cubren:
+
+- Conversión y envío de la operación al repositorio.
+- Rechazo de monto negativo.
+- Rechazo de monto nulo.
+- Normalización de códigos de moneda.
+- Rechazo de formato de moneda inválido.
+- Ausencia de guardado cuando falla el proveedor.
+- Redondeo según la moneda destino.
+
+Las pruebas unitarias usan mocks y no necesitan una API Key
+ni hacen llamadas reales al proveedor.
+
+También se verificó manualmente una conversión USD a PEN
+y su registro en H2.
+
+## Limitaciones
+
+- La disponibilidad de la conversión depende del proveedor externo.
+- Los errores HTTP del proveedor se agrupan actualmente como 502.
+- Las monedas disponibles dependen tanto del catálogo del JDK
+  como del soporte del proveedor.
+- No se incluye caché ni historial expuesto mediante API.
+- Los límites de precisión de H2 pueden impedir almacenar
+  resultados extremos.
+  
